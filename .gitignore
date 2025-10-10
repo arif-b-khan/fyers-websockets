@@ -57,3 +57,4 @@ fyers_depth.db
 .env.test.local
 .env.production.local
 
+.venv
