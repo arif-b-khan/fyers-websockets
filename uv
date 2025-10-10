@@ -1,0 +1,16 @@
+#!/bin/zsh
+# Simple launcher to run the app with uvicorn
+set -euo pipefail
+
+VENV_DIR=".venv"
+if [ -d "$VENV_DIR" ]; then
+  source "$VENV_DIR/bin/activate"
+fi
+
+# Accept optional first argument as port, default to 5000
+PORT=${1:-5000}
+
+# Forward any additional args to uvicorn
+shift 1 2>/dev/null || true
+
+exec uvicorn asgi:asgi_app --reload --port "$PORT" "$@"
