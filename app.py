@@ -4,11 +4,12 @@ import time
 import asyncio
 import websockets
 import re
-from flask import Flask, render_template, request, redirect, url_for, session, jsonify, flash
+from flask import Flask, render_template, request, redirect, url_for, session, jsonify
 from flask_socketio import SocketIO
 from dotenv import load_dotenv
 import msg_pb2
-from database import init_db, authenticate_user, get_auth_token, upsert_auth, find_user_by_username, get_auth_data
+from database import init_db, get_auth_token, upsert_auth, get_auth_data
+from duckdb_integration import duckdb_manager
 from auth_utils import authenticate_broker, handle_auth_success, mask_api_credential
 
 # Load environment variables
@@ -371,6 +372,7 @@ def process_market_depth(message_bytes):
                 }
                 
                 market_data[ticker] = frontend_data
+                duckdb_manager.store_market_depth(frontend_data)
         
         return market_data if len(market_data) > 0 else None
     except Exception as e:
@@ -390,7 +392,7 @@ async def subscribe_symbols():
             }
         }
         
-        print(f"\n=== Sending Subscribe Message ===")
+        print("\n=== Sending Subscribe Message ===")
         print(f"Message: {json.dumps(subscribe_msg, indent=2)}")
         
         if websocket:
@@ -482,7 +484,7 @@ async def websocket_client():
                         print(f"Error processing message: {e}")
                         
         except Exception as e:
-            print(f"\n=== Connection Error ===")
+            print("\n=== Connection Error ===")
             print(f"Error: {str(e)}")
             
         print("\nRetrying connection in 5 seconds...")
@@ -602,6 +604,66 @@ def get_config():
         'symbol': SYMBOL,
         'app_name': 'Fyers Dom Analyzer'
     }
+
+@app.route('/api/market_depth/history')
+def get_market_depth_history():
+    """Return stored market depth snapshots for the requested ticker."""
+    ticker = request.args.get('ticker', SYMBOL)
+    try:
+        limit = int(request.args.get('limit', 25))
+    except (TypeError, ValueError):
+        limit = 25
+    limit = max(1, min(limit, 500))
+
+    try:
+        snapshots = duckdb_manager.fetch_snapshots(ticker, limit)
+        return jsonify({'ticker': ticker, 'snapshots': snapshots})
+    except Exception as exc:
+        print(f"Error fetching snapshots: {exc}")
+        return jsonify({'error': 'Unable to fetch historical market depth'}), 500
+
+@app.route('/api/market_depth/history/<int:snapshot_id>/levels')
+def get_market_depth_levels(snapshot_id):
+    """Return stored depth levels for a snapshot."""
+    try:
+        levels = duckdb_manager.fetch_levels(snapshot_id)
+        if not levels:
+            return jsonify({'snapshot_id': snapshot_id, 'levels': []}), 404
+        return jsonify({'snapshot_id': snapshot_id, 'levels': levels})
+    except Exception as exc:
+        print(f"Error fetching snapshot levels: {exc}")
+        return jsonify({'error': 'Unable to fetch snapshot levels'}), 500
+
+@app.route('/api/market_depth/history/<int:snapshot_id>', methods=['PATCH'])
+def update_market_depth_snapshot(snapshot_id):
+    """Update stored totals for an existing snapshot."""
+    payload = request.get_json(silent=True) or {}
+    bid_qty = payload.get('total_bid_qty')
+    sell_qty = payload.get('total_sell_qty')
+
+    if bid_qty is None and sell_qty is None:
+        return jsonify({'error': 'No fields to update'}), 400
+
+    try:
+        updated = duckdb_manager.update_snapshot_totals(snapshot_id, bid_qty, sell_qty)
+        if not updated:
+            return jsonify({'error': 'Snapshot not found'}), 404
+        return jsonify({'snapshot_id': snapshot_id, 'updated': True})
+    except Exception as exc:
+        print(f"Error updating snapshot: {exc}")
+        return jsonify({'error': 'Unable to update snapshot'}), 500
+
+@app.route('/api/market_depth/history/<int:snapshot_id>', methods=['DELETE'])
+def delete_market_depth_snapshot(snapshot_id):
+    """Delete a stored snapshot and its levels."""
+    try:
+        deleted = duckdb_manager.delete_snapshot(snapshot_id)
+        if not deleted:
+            return jsonify({'error': 'Snapshot not found'}), 404
+        return jsonify({'snapshot_id': snapshot_id, 'deleted': True})
+    except Exception as exc:
+        print(f"Error deleting snapshot: {exc}")
+        return jsonify({'error': 'Unable to delete snapshot'}), 500
 
 @socketio.on('connect')
 def handle_connect():
